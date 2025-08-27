@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Elbow Flexion Sync Animation (Master vs Follower)</title>
+  <style>
+    :root {--size:560px;--r:220;--handLen:205;--epsDeg:20;--durationMs:5000;}
+    body{font-family:ui-sans-serif,system-ui,sans-serif;display:grid;place-items:center;min-height:100vh;background:#fafafa;color:#111;}
+    .wrap{width:min(94vw,var(--size));position:relative;}
+    .panel{display:grid;gap:10px;}
+    .controls{display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:center;}
+    button{padding:8px 14px;border-radius:10px;border:1px solid #ddd;background:white;box-shadow:0 1px 2px rgba(0,0,0,.05);cursor:pointer;font-weight:600;}
+    .readout{text-align:center;font-size:14px;color:#333}
+    svg{width:100%;height:auto;background:#fff;border-radius:14px;box-shadow:0 8px 20px rgba(0,0,0,.07);}
+    .axis{stroke:#f24;stroke-dasharray:6 6;stroke-width:2;opacity:.9;}
+    .ring{stroke:#111;stroke-width:4;fill:none;}
+    .hand{stroke-linecap:round;stroke-width:5;}
+    .hand.master{stroke:#22a35a;}
+    .hand.follower{stroke:#d63434;}
+    .sector{opacity:.7;stroke:none;}
+    .legend{font-size:12px;fill:#444;}
+    .tooltip{position:absolute;pointer-events:none;background:rgba(0,0,0,0.8);color:#fff;padding:6px 8px;border-radius:8px;font-size:12px;transform:translate(-50%,-120%);white-space:nowrap;opacity:0;transition:opacity .12s ease;}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="panel">
+      <svg id="scene" viewBox="0 0 600 640">
+        <g id="dial" data-cx="300" data-cy="300" data-r="220" data-hand="205">
+          <circle class="ring" cx="300" cy="300" r="220" />
+          <line class="axis" x1="300" y1="80" x2="300" y2="520" />
+          <text x="300" y="60" text-anchor="middle" font-size="18">180</text>
+          <text x="300" y="590" text-anchor="middle" font-size="18">0</text>
+          <text x="300" y="620" text-anchor="middle" font-size="16">Flexion</text>
+          <g id="sectors"></g>
+          <line id="handMaster" class="hand master" x1="300" y1="300" x2="300" y2="95" />
+          <line id="handFollower" class="hand follower" x1="300" y1="300" x2="300" y2="95" />
+          <circle cx="300" cy="300" r="5" fill="#333" />
+        </g>
+      </svg>
+      <div class="controls">
+        <button id="btnPlay">Play / Replay</button>
+        <button id="btnPause">Pause</button>
+        <button id="btnStep">Step +50ms</button>
+      </div>
+      <div class="readout" id="readout"></div>
+    </div>
+    <div id="tooltip" class="tooltip"></div>
+  </div>
+  <script>
+    const DURATION=parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--durationMs'))||5000;
+    const EPS=parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--epsDeg'))||20;
+    const dial=document.getElementById('dial');
+    const cx=parseFloat(dial.dataset.cx), cy=parseFloat(dial.dataset.cy), HAND=parseFloat(dial.dataset.hand);
+    const handM=document.getElementById('handMaster'), handF=document.getElementById('handFollower');
+    const sectorsG=document.getElementById('sectors');
+    const readout=document.getElementById('readout');
+    const btnPlay=document.getElementById('btnPlay'), btnPause=document.getElementById('btnPause'), btnStep=document.getElementById('btnStep');
+    const tooltip=document.getElementById('tooltip');
+
+    let startTime=null,t=0,paused=false,rafId=null;
+    let inDesync=false,desyncStartAngle=null,desyncStartDiff=0;
+    let desyncStartSign=0,desyncStartTime=0,desyncMaxAbs=0;
+
+    function reset(){
+      cancelAnimationFrame(rafId);
+      startTime=null; t=0; paused=false; rafId=null;
+      inDesync=false; desyncStartAngle=null; desyncStartDiff=0;
+      desyncStartSign=0; desyncStartTime=0; desyncMaxAbs=0;
+      sectorsG.innerHTML='';
+      setHand(handM,0); setHand(handF,0);
+      updateReadout(0,0);
+    }
+
+    function angleToPoint(theta,len=HAND){const rad=theta*Math.PI/180;return {x:cx+len*Math.sin(rad),y:cy+len*Math.cos(rad)};}
+    function setHand(el,theta){const p=angleToPoint(theta,HAND);el.setAttribute('x1',cx);el.setAttribute('y1',cy);el.setAttribute('x2',p.x);el.setAttribute('y2',p.y);}
+
+    function addSector(thetaFrom,thetaTo,masterLeads,tStartMs,tEndMs,maxDeltaAbs){
+      if(thetaTo<=thetaFrom) return;
+      const step=2; const pts=[];
+      const p0=angleToPoint(thetaFrom,HAND); pts.push(`M ${cx} ${cy} L ${p0.x} ${p0.y}`);
+      for(let th=thetaFrom+step; th<thetaTo; th+=step){ const p=angleToPoint(th,HAND); pts.push(`L ${p.x} ${p.y}`); }
+      const p1=angleToPoint(thetaTo,HAND); pts.push(`L ${p1.x} ${p1.y} Z`);
+      const path=document.createElementNS('http://www.w3.org/2000/svg','path');
+      path.setAttribute('d', pts.join(' '));
+      path.setAttribute('class','sector');
+      const color = masterLeads ? '#ffeb70' : '#ff6b6b';
+      path.setAttribute('fill', color);
+      const leader = masterLeads ? 'Master (เขียว) นำ' : 'Follower (แดง) นำ';
+      const dur = Math.max(0, Math.round((tEndMs||0)-(tStartMs||0)));
+      path.dataset.leader=leader;
+      path.dataset.start=thetaFrom.toFixed(1);
+      path.dataset.end=thetaTo.toFixed(1);
+      path.dataset.dur=dur;
+      path.dataset.maxd=(maxDeltaAbs||0).toFixed(1);
+      path.addEventListener('mousemove',e=>{tooltip.innerHTML=`${leader}<br>เริ่ม: ${path.dataset.start}° → จบ: ${path.dataset.end}°<br>ระยะเวลา: ${path.dataset.dur} ms | Δสูงสุด: ${path.dataset.maxd}°`;tooltip.style.left=e.pageX+'px';tooltip.style.top=e.pageY+'px';tooltip.style.opacity=1;});
+      path.addEventListener('mouseleave',()=>{tooltip.style.opacity=0;});
+      sectorsG.appendChild(path);
+    }
+
+    function deltaDeg(ms){
+      const s = ms/1000;
+      if (s < 1.5) return 0;                                  // sync longer
+      if (s < 2.5) { const u = (s-1.5)/1.0; return 40*u; }     // master lead
+      if (s < 3.0) { const u = (s-2.5)/0.5; return 40*(1-u);}  // back to 0
+      if (s < 4.0) { const u = (s-3.0)/1.0; return -30*u; }    // follower lead
+      if (s < 4.5) { const u = (s-4.0)/0.5; return -30*(1-u);} // back to 0
+      if (s < 4.8){ const u = (s-4.5)/0.3; return 20*u; }      // short master lead
+      if (s < 5.0) { const u = (s-4.8)/0.2; return 20*(1-u);}  // end at 0
+      return 0;
+    }
+    function baseTheta(ms){const clamped=Math.max(0,Math.min(ms,DURATION));return 180*(clamped/DURATION);}
+
+    function updateFrame(now){
+      if(startTime===null) startTime=now;
+      if(!paused) t=now-startTime;
+      if(t>DURATION) t=DURATION;
+      const base=baseTheta(t), d=deltaDeg(t);
+      const thetaM=base+d/2, thetaF=base-d/2, thetaMid=(thetaM+thetaF)/2;
+      setHand(handM,thetaM); setHand(handF,thetaF);
+
+      const diff = thetaM - thetaF;
+      const diffAbs = Math.abs(diff);
+      const ENTER = EPS;           
+      const EXIT  = EPS * 0.75;    
+      const sign  = diff===0 ? (desyncStartSign||1) : Math.sign(diff);
+
+      if(!inDesync && diffAbs > ENTER){
+        inDesync = true;
+        desyncStartAngle = thetaMid;
+        desyncStartDiff  = diff;
+        desyncStartSign  = sign;
+        desyncStartTime  = t;
+        desyncMaxAbs     = diffAbs;
+      } else if(inDesync){
+        if(diffAbs > desyncMaxAbs) desyncMaxAbs = diffAbs;
+        if(Math.sign(diff)!==0 && Math.sign(diff)!==desyncStartSign){
+          addSector(desyncStartAngle, thetaMid, desyncStartSign>0, desyncStartTime, t, desyncMaxAbs);
+          desyncStartAngle = thetaMid;
+          desyncStartSign  = Math.sign(diff);
+          desyncStartTime  = t;
+          desyncMaxAbs     = diffAbs;
+        }
+        if(diffAbs <= EXIT){
+          addSector(desyncStartAngle, thetaMid, desyncStartSign>0, desyncStartTime, t, desyncMaxAbs);
+          inDesync=false; desyncStartAngle=null; desyncStartDiff=0; desyncStartSign=0; desyncStartTime=0; desyncMaxAbs=0;
+        }
+      }
+
+      updateReadout(thetaM,thetaF);
+      if(t < DURATION){ rafId=requestAnimationFrame(updateFrame); }
+      else if(inDesync){
+        addSector(desyncStartAngle, thetaMid, desyncStartSign>0, desyncStartTime, t, desyncMaxAbs);
+        inDesync=false; desyncStartAngle=null; desyncStartDiff=0; desyncStartSign=0; desyncStartTime=0; desyncMaxAbs=0;
+      }
+    }
+
+    function updateReadout(thetaM,thetaF){const diff=Math.abs(thetaM-thetaF);readout.textContent=`master: ${thetaM.toFixed(1)}° | follower: ${thetaF.toFixed(1)}° | Δ=${diff.toFixed(1)}° (ε=${EPS}°)`;}
+
+    btnPlay.addEventListener('click',()=>{reset();rafId=requestAnimationFrame(updateFrame);});
+    btnPause.addEventListener('click',()=>{if(t>=DURATION)return;paused=!paused;btnPause.textContent=paused?'Resume':'Pause';if(!paused){startTime=performance.now()-t;rafId=requestAnimationFrame(updateFrame);}});
+    btnStep.addEventListener('click',()=>{const STEP=50;if(startTime===null)startTime=performance.now();paused=true;btnPause.textContent='Resume';t=Math.min(DURATION,t+STEP);updateFrame(performance.now());});
+
+    reset();
+  </script>
+</body>
+</html>
